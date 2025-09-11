@@ -1,0 +1,6 @@
+python3/__pycache__/
+doc/tags
+.toml
+.yml
+*.pyc
+

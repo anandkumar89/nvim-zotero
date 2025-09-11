@@ -1,0 +1,9 @@
+{
+    "Lua.diagnostics.globals": [
+        "annotation_picker",
+        "vim"
+    ],
+    "Lua.diagnostics.disable": [
+        "lowercase-global"
+    ]
+}
