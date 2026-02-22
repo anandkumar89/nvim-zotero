@@ -5,6 +5,39 @@ local ns = vim.api.nvim_create_namespace("ZSeekPreview")
 local M = {}
 local use_fzf = true		-- read from configurations
 
+-- Preview state
+local PREVIEW_MODES = {
+    METADATA = "metadata",
+    NOTES = "notes",
+    ANNOTATIONS = "annotations"
+}
+local current_preview_mode = PREVIEW_MODES.METADATA
+
+local get_notes = function(citekey)
+    local repl = vim.fn.py3eval('ZotCite.GetNotes("' .. citekey .. '")')
+    if repl == vim.NIL or repl == "" then
+        return "No notes found."
+    end
+    -- Add a header and simple demarcation
+    return "# NOTES\n\n" .. repl:gsub("\n\n", "\n\n---\n\n")
+end
+
+local get_annotations = function(citekey)
+    local raw_annotations = vim.fn.py3eval('ZotCite.GetAnnotations("' .. citekey .. '", 0)')
+    if #raw_annotations == 0 then
+        return "No annotations found."
+    end
+    -- Format annotations with dividers
+    local lines = { "# ANNOTATIONS", "" }
+    for _, line in ipairs(raw_annotations) do
+        table.insert(lines, line)
+        if line:match("^[^>]") then -- If it's a comment/text not starting with >
+             table.insert(lines, "---")
+        end
+    end
+    return table.concat(lines, "\n")
+end
+
 if not use_fzf then 			-- use telescope if not fzf_lua
 	local pickers = require("telescope.pickers")
 	local finders = require("telescope.finders")
@@ -130,13 +163,14 @@ end
 
 ---------------------------- fzf begin 
 fopts = {
-	['--header']    = "<C-o>: Notes | <CR>: Sioyek | <C-a> : Annotation | <C-x> : Cite",
+	['--header']    = "<C-o>: Notes | <CR>: Sioyek | <C-a> : Annotation | <C-x> : Cite | <C-m> : Metadata",
 	['--delimiter'] = '\t',
 	['--with-nth']  = '2',
 	['--ansi']      = true,
 	['--no-sort']   = "",
 	['--multi']     = "",
-	['--preview-window']   = "wrap:hidden"
+	['--preview-window']   = "wrap:hidden",
+    ['--bind']      = "ctrl-o:preview:refresh,ctrl-a:preview:refresh,ctrl-m:preview:refresh"
 }
 
 bibdata = {}
@@ -196,16 +230,31 @@ fzf_picker = function(data, pref)
 					local previewer = base:extend()
 					function previewer:populate_preview_buf(selection)
 						local citekey = selection:match("([^\t]+)")
-						local text = previewtext[citekey]
+						local text_data
+                        
+                        if current_preview_mode == PREVIEW_MODES.NOTES then
+                            text_data = { get_notes(citekey), {} }
+                        elseif current_preview_mode == PREVIEW_MODES.ANNOTATIONS then
+                            text_data = { get_annotations(citekey), {} }
+                        else
+                            text_data = previewtext[citekey]
+                        end
+
 						local tmpbuf = self:get_tmp_buffer()
-						vim.api.nvim_buf_set_lines(tmpbuf, 0, -1, false, vim.split(text[1], '\n'))
-						for _, h in pairs(text[2]) do
-							if vim.fn.has("nvim-0.11") == 1 then
-								vim.hl.range(tmpbuf, ns, h.g, { 0, h.s }, { 0, h.e }, {})
-							else
-								vim.api.nvim_buf_add_highlight(tmpbuf, -1, h.g, 0, h.s, h.e)
-							end
-						end
+						vim.api.nvim_buf_set_lines(tmpbuf, 0, -1, false, vim.split(text_data[1], '\n'))
+                        
+                        -- Set syntax to markdown for notes/annotations
+                        if current_preview_mode ~= PREVIEW_MODES.METADATA then
+                            vim.api.nvim_set_option_value("filetype", "markdown", { buf = tmpbuf })
+                        else
+						    for _, h in pairs(text_data[2]) do
+							    if vim.fn.has("nvim-0.11") == 1 then
+								    vim.hl.range(tmpbuf, ns, h.g, { 0, h.s }, { 0, h.e }, {})
+							    else
+								    vim.api.nvim_buf_add_highlight(tmpbuf, -1, h.g, 0, h.s, h.e)
+							    end
+						    end
+                        end
 						self:set_preview_buf(tmpbuf)
 					end
 				return previewer
@@ -220,16 +269,24 @@ fzf_picker = function(data, pref)
 						require("zotcite.get").open_attachment(citekey)
 					end
 				end,
-				['ctrl-o'] = function(selected, opts)
-					local citekey = selected[1]:match("([^\t]+)")
-					if citekey and pref.cb then
-						pref.cb(citekey)
-					end
-				end,
-				['ctrl-a'] = function (selected, opts)
-					local citekey = selected[1]:match("([^\t]+)")
-					annotation_picker(citekey, fzf_picker)
-				end,
+				['ctrl-o'] = {
+                    fn = function(selected, opts)
+					    current_preview_mode = PREVIEW_MODES.NOTES
+				    end,
+                    exec_silent = true
+                },
+				['ctrl-a'] = {
+                    fn = function(selected, opts)
+					    current_preview_mode = PREVIEW_MODES.ANNOTATIONS
+				    end,
+                    exec_silent = true
+                },
+                ['ctrl-m'] = {
+                    fn = function(selected, opts)
+                        current_preview_mode = PREVIEW_MODES.METADATA
+                    end,
+                    exec_silent = true
+                },
 				-- -- Open loclist with selected references in formatted sense : @citekey Year Title
 				-- -- Has keymaps to open in Sioyek or copy citekeys or open annotations or corresponding notes
 				-- ['ctrl-q'] = function (selected, opts)
@@ -345,6 +402,8 @@ M.refs = function(key, cb)
 
 
 
+
+		current_preview_mode = PREVIEW_MODES.METADATA -- Reset to default on open
 		fzf_picker(bibdata, {exact=true, prompt="grep >", cb=cb})
 
 	else
@@ -380,7 +439,18 @@ M.refs = function(key, cb)
 				previewer = previewers.new_buffer_previewer({
 					define_preview = function(self, entry, _)
 						local bufnr = self.state.bufnr
-						local preview_text, hl = format_preview(entry.value)
+						local preview_text, hl
+                        
+                        if current_preview_mode == PREVIEW_MODES.NOTES then
+                            preview_text = get_notes(entry.value.cite)
+                            hl = {}
+                        elseif current_preview_mode == PREVIEW_MODES.ANNOTATIONS then
+                            preview_text = get_annotations(entry.value.cite)
+                            hl = {}
+                        else
+                            preview_text, hl = format_preview(entry.value)
+                        end
+
 						vim.api.nvim_buf_set_lines(
 							bufnr,
 							0,
@@ -388,21 +458,32 @@ M.refs = function(key, cb)
 							false,
 							vim.split(preview_text, "\n")
 						)
-						for _, h in pairs(hl) do
-							if vim.fn.has("nvim-0.11") == 1 then
-								vim.hl.range(bufnr, ns, h.g, { 0, h.s }, { 0, h.e }, {})
-							else
-								vim.api.nvim_buf_add_highlight(bufnr, -1, h.g, 0, h.s, h.e)
-							end
-						end
+                        
+                        if current_preview_mode ~= PREVIEW_MODES.METADATA then
+                            vim.api.nvim_set_option_value("filetype", "markdown", { buf = bufnr })
+                        else
+						    for _, h in pairs(hl) do
+							    if vim.fn.has("nvim-0.11") == 1 then
+								    vim.hl.range(bufnr, ns, h.g, { 0, h.s }, { 0, h.e }, {})
+							    else
+								    vim.api.nvim_buf_add_highlight(bufnr, -1, h.g, 0, h.s, h.e)
+							    end
+						    end
+                        end
 					end,
 				}),
 				attach_mappings = function(prompt_bufnr, map)
 					map("i", "<C-o>", function()
-						local selection = action_state.get_selected_entry()
-						actions.close(prompt_bufnr)
-						-- Handle the selected reference here
-						cb(selection)
+						current_preview_mode = PREVIEW_MODES.NOTES
+                        action_state.get_current_picker(prompt_bufnr):refresh_previewer()
+					end)
+					map("i", "<C-a>", function()
+						current_preview_mode = PREVIEW_MODES.ANNOTATIONS
+                        action_state.get_current_picker(prompt_bufnr):refresh_previewer()
+					end)
+					map("i", "<C-m>", function()
+						current_preview_mode = PREVIEW_MODES.METADATA
+                        action_state.get_current_picker(prompt_bufnr):refresh_previewer()
 					end)
 					map("i", "<CR>", function()
 						local selection = action_state.get_selected_entry()
