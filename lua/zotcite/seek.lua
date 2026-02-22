@@ -11,7 +11,35 @@ local PREVIEW_MODES = {
     NOTES = "notes",
     ANNOTATIONS = "annotations"
 }
-local current_preview_mode = PREVIEW_MODES.METADATA
+local PREVIEW_MODES = {
+    METADATA = "metadata",
+    NOTES = "notes",
+    ANNOTATIONS = "annotations"
+}
+local current_preview_mode = PREVIEW_MODES.METADATA -- Default fallback
+
+local get_mode_file = function()
+    local tmpdir = vim.env.Zotcite_tmpdir or "/tmp"
+    return tmpdir .. "/zotcite_preview_mode"
+end
+
+local set_mode = function(mode)
+    local f = io.open(get_mode_file(), "w")
+    if f then
+        f:write(mode)
+        f:close()
+    end
+end
+
+local get_mode = function()
+    local f = io.open(get_mode_file(), "r")
+    if f then
+        local mode = f:read("*all")
+        f:close()
+        return mode:gsub("%s+", "")
+    end
+    return PREVIEW_MODES.METADATA
+end
 
 local get_notes = function(citekey)
     local repl = vim.fn.py3eval('ZotCite.GetNotes("' .. citekey .. '")')
@@ -162,16 +190,29 @@ local format_preview = function(v)
 end
 
 ---------------------------- fzf begin 
-fopts = {
+local fopts = {
 	['--header']    = "<C-o>: Notes | <CR>: Sioyek | <C-a> : Annotation | <C-x> : Cite | <C-m> : Metadata",
 	['--delimiter'] = '\t',
 	['--with-nth']  = '2',
 	['--ansi']      = true,
 	['--no-sort']   = "",
 	['--multi']     = "",
-	['--preview-window']   = "wrap:hidden",
-    ['--bind']      = "ctrl-o:preview:refresh,ctrl-a:preview:refresh,ctrl-m:preview:refresh"
+	['--preview-window']   = "wrap:hidden"
 }
+
+local get_fopts = function()
+    local mode_file = get_mode_file()
+    local opts = vim.deepcopy(fopts)
+    opts['--bind'] = string.format(
+        "ctrl-o:execute-silent(echo %s > %s)+preview:refresh," ..
+        "ctrl-a:execute-silent(echo %s > %s)+preview:refresh," ..
+        "ctrl-m:execute-silent(echo %s > %s)+preview:refresh",
+        PREVIEW_MODES.NOTES, mode_file,
+        PREVIEW_MODES.ANNOTATIONS, mode_file,
+        PREVIEW_MODES.METADATA, mode_file
+    )
+    return opts
+end
 
 bibdata = {}
 fzf_query   = ""
@@ -223,7 +264,7 @@ fzf_picker = function(data, pref)
 					wrap = true,
 				},
 			},
-			fzf_opts = fopts,
+			fzf_opts = get_fopts(),
 			previewer = {
 				_ctor = function()
 					local base = require 'fzf-lua.previewer.builtin'.buffer_or_file
@@ -231,10 +272,11 @@ fzf_picker = function(data, pref)
 					function previewer:populate_preview_buf(selection)
 						local citekey = selection:match("([^\t]+)")
 						local text_data
+                        local mode = get_mode()
                         
-                        if current_preview_mode == PREVIEW_MODES.NOTES then
+                        if mode == PREVIEW_MODES.NOTES then
                             text_data = { get_notes(citekey), {} }
-                        elseif current_preview_mode == PREVIEW_MODES.ANNOTATIONS then
+                        elseif mode == PREVIEW_MODES.ANNOTATIONS then
                             text_data = { get_annotations(citekey), {} }
                         else
                             text_data = previewtext[citekey]
@@ -244,7 +286,8 @@ fzf_picker = function(data, pref)
 						vim.api.nvim_buf_set_lines(tmpbuf, 0, -1, false, vim.split(text_data[1], '\n'))
                         
                         -- Set syntax to markdown for notes/annotations
-                        if current_preview_mode ~= PREVIEW_MODES.METADATA then
+                        local mode = get_mode()
+                        if mode ~= PREVIEW_MODES.METADATA then
                             vim.api.nvim_set_option_value("filetype", "markdown", { buf = tmpbuf })
                         else
 						    for _, h in pairs(text_data[2]) do
@@ -269,24 +312,6 @@ fzf_picker = function(data, pref)
 						require("zotcite.get").open_attachment(citekey)
 					end
 				end,
-				['ctrl-o'] = {
-                    fn = function(selected, opts)
-					    current_preview_mode = PREVIEW_MODES.NOTES
-				    end,
-                    exec_silent = true
-                },
-				['ctrl-a'] = {
-                    fn = function(selected, opts)
-					    current_preview_mode = PREVIEW_MODES.ANNOTATIONS
-				    end,
-                    exec_silent = true
-                },
-                ['ctrl-m'] = {
-                    fn = function(selected, opts)
-                        current_preview_mode = PREVIEW_MODES.METADATA
-                    end,
-                    exec_silent = true
-                },
 				-- -- Open loclist with selected references in formatted sense : @citekey Year Title
 				-- -- Has keymaps to open in Sioyek or copy citekeys or open annotations or corresponding notes
 				-- ['ctrl-q'] = function (selected, opts)
@@ -403,7 +428,8 @@ M.refs = function(key, cb)
 
 
 
-		current_preview_mode = PREVIEW_MODES.METADATA -- Reset to default on open
+
+		set_mode(PREVIEW_MODES.METADATA) -- Reset to default on open
 		fzf_picker(bibdata, {exact=true, prompt="grep >", cb=cb})
 
 	else
