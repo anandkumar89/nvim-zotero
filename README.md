@@ -12,16 +12,17 @@ A powerful Neovim plugin designed to bring Zotero's library management directly 
     - **Zotero Database**: Transparently falls back to the main Zotero database if a key is not found locally.
 - **Enhanced Search Picker (`Zseek`)**:
     - **Floating UI**: Uses `fzf-lua` (recommended) or `Telescope` for a fast, searchable interface.
-    - **Multi-Mode Previewer**: Toggle between views instantly without closing the picker:
-        - `<C-o>`: **Notes Mode** — Shows associated Zotero notes.
-        - `<C-a>`: **Annotations Mode** — Shows PDF annotations.
-        - `<C-m>`: **Metadata Mode** — Returns to reference details and abstract.
+    - **Bulk Actions & Scratch Buffer**: Select multiple entries and press `<C-n>` (Notes) or `<C-a>` (Annotations) to collate their contents into a Markdown-formatted scratch buffer.
+    - **Grouped Annotations**: If a citation has multiple PDF attachments, annotations are clearly grouped by filename in the scratch buffer.
+    - **Clickable Links**: Scratch buffers include `[Zotero Link]` elements that open the exact item in Zotero.
     - **Cite Insertion**: Select multiple entries and press `<C-x>` to insert citekeys directly into your buffer.
+    - **Metadata Preview**: The metadata preview is visible by default and can be toggled via `<C-i>`.
 - **Advanced Zotero Reader Integration**:
     - **Zotero-First Opening**: Pressing `<leader>zo` on a citation opens the PDF directly in Zotero's reader.
     - **Page Parameters**: Automatically appends `?page=PNUM` to open the cited page directly.
-    - **Group Support**: Full compatibility with both Personal and Shared Group libraries.
-- **Attachment Selection**: If multiple PDFs are associated with a citation, a clear picker displays full filenames for easy selection.
+    - **Attachment Selection**: If multiple PDFs are associated with a citation, a clear picker displays full filenames for easy selection.
+- **Direct Citation Access**:
+    - Placing your cursor on a `@citekey` and pressing `<leader>za` or `<leader>zn` bypasses the picker and opens the scratch buffer directly.
 
 ## 🛠 Installation
 
@@ -50,8 +51,9 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
 | :--- | :--- | :--- |
 | `<leader>zs` | Normal | Open **Zseek** search (Search by Author/Year/Title) |
 | `<leader>zo` | Normal | Open PDF in Zotero (or default viewer) |
-| `<leader>za` | Normal | Insert PDF Annotations at cursor |
-| `<leader>zn` | Normal | Insert Zotero Notes at cursor |
+| `<leader>zi` | Normal | Echo Reference Info (Metadata + Citekey) |
+| `<leader>za` | Normal | Open PDF Annotations in Scratch Buffer (Directly if on citation) |
+| `<leader>zn` | Normal | Open Zotero Notes in Scratch Buffer (Directly if on citation) |
 | `<leader>zy` | Normal | Insert YAML Metadata (Markdown/Quarto) |
 
 ### Inside Zseek Picker:
@@ -59,10 +61,11 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim):
 | Keymap | Action |
 | :--- | :--- |
 | `<CR>` | Open associated PDF |
+| `<C-o>` | Open associated PDF |
+| `<C-i>` | Toggle Metadata Preview |
+| `<C-n>` | Open Notes in Scratch Buffer (Bulk Action) |
+| `<C-a>` | Open Annotations in Scratch Buffer (Bulk Action) |
 | `<C-x>` | Insert Citekey(s) into buffer |
-| `<C-o>` | Toggle Preview: **Notes** |
-| `<C-a>` | Toggle Preview: **Annotations** |
-| `<C-m>` | Toggle Preview: **Metadata** |
 
 ## ⚙️ Configuration
 
