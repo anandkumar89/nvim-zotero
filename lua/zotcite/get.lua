@@ -13,70 +13,184 @@ local citation = {
 
 local M = {}
 
-local TranslateZPath = function(strg)
-    local fpath = strg
+local TranslateZPath = function(strg, citekey)
+    local id, libDir, rest = strg:match("([^:]+):([^:]+):(.*)")
 
-    if
-        config.open_in_zotero
-        and (string.lower(strg):find("%.pdf$") or string.lower(strg):find("%.html$"))
-    then
-        local id = fpath:gsub(":.*", "")
-        return "zotero://open-pdf/library/items/" .. id
-    end
-
-    if strg:find(":attachments:") then
-        -- The user has set Edit / Preferences / Files and Folders / Base directory for linked attachments
-        if config.attach_dir == "" then
-            zwarn("Attachments dir is not defined")
+    if config.open_in_zotero and id and id:len() == 8 and id ~= "local" then
+        local uri = ""
+        if string.lower(strg):find("%.pdf$") then
+            uri = "zotero://open-pdf/" .. libDir .. "/items/" .. id
+            -- Check for page data
+            if citekey and pdfnote_data.citekey and pdfnote_data.citekey:find("@" .. citekey) then
+                if pdfnote_data.pg and pdfnote_data.pg ~= "" then
+                    uri = uri .. "?page=" .. pdfnote_data.pg
+                end
+            end
         else
-            fpath = strg:gsub(".*:attachments:", "/" .. config.attach_dir .. "/")
+            uri = "zotero://select/" .. libDir .. "/items/" .. id
         end
-    elseif strg:find(":/") then
-        -- Absolute file path
-        fpath = strg:gsub(".*:/", "/")
-    elseif strg:find(":storage:") then
-        -- Default path
-        fpath = config.data_dir .. strg:gsub("(.*):storage:", "/storage/%1/")
+        return uri
     end
-    if vim.fn.filereadable(fpath) == 0 then
+
+    local fpath = strg
+    if id and libDir and rest then
+        fpath = rest
+        if fpath:find("^storage:") then
+            fpath = config.data_dir .. fpath:gsub("^storage:", "/storage/" .. id .. "/")
+        elseif fpath:find("^attachments:") then
+            if config.attach_dir == "" then
+                zwarn("Attachments dir is not defined")
+                fpath = ""
+            else
+                fpath = fpath:gsub("^attachments:", "/" .. config.attach_dir .. "/")
+            end
+        end
+    end
+
+    if fpath ~= "" and vim.fn.filereadable(fpath) == 0 then
+        -- Search for the last colon to get the filename as a last resort
+        local fallback = strg:match(".*:([^:]+)$")
+        if fallback and vim.fn.filereadable(fallback) == 1 then
+            return fallback
+        end
         zwarn('Could not find "' .. fpath .. '"')
         fpath = ""
     end
     return fpath
 end
 
+local get_ref_data_prioritized = function(citekey)
+    local repl = nil
+    if (vim.o.filetype == "tex" or vim.o.filetype == "latex") and vim.fn.exists("*vimtex#bib#files") == 1 then
+        local bib_files = vim.fn["vimtex#bib#files"]()
+        if #bib_files > 0 then
+            repl = vim.fn.py3eval('ZotCite.GetBibRefData("' .. citekey .. '", ' .. vim.fn.json_encode(bib_files) .. ')')
+            if repl == vim.NIL then repl = nil end
+        end
+    end
+    if not repl then
+        repl = vim.fn.py3eval('ZotCite.GetRefData("' .. citekey .. '")')
+        if repl == vim.NIL then repl = nil end
+    end
+    return repl
+end
+
 M.PDFPath = function(citekey, cb)
-    local repl = vim.fn.py3eval('ZotCite.GetAttachment("' .. citekey .. '")')
-    if #repl == 0 then
-        zwarn("Got empty list")
+    local repl = nil
+    local data = get_ref_data_prioritized(citekey)
+    if data and data.attachment and #data.attachment > 0 then
+        -- Check if first attachment exists
+        local p = vim.fn.expand(data.attachment[1])
+        if vim.fn.filereadable(p) == 1 then
+            repl = data.attachment
+        end
+    end
+
+    if not repl or #repl == 0 then
+        repl = vim.fn.py3eval('ZotCite.GetAttachment("' .. citekey .. '")')
+    end
+
+    if #repl == 0 or repl[1] == "nOcItEkEy" or repl[1] == "nOaTtAChMeNt" then
+        local msg = "No attachment found for " .. citekey
+        if data and data.file then
+            msg = msg .. ". BibTeX file field: " .. data.file .. ". Consider importing this to Zotero (File > Import)."
+        end
+        zwarn(msg)
         return
     end
-    if repl[1] == "nOaTtAChMeNt" then
-        zwarn("Attachment not found")
-    elseif repl[1] == "nOcItEkEy" then
-        zwarn("Citation key not found")
-    else
-        local fpaths = {}
-        local item = ""
-        for _, v in pairs(repl) do
-            item = TranslateZPath(v):gsub(".*storage:", "")
-            table.insert(fpaths, item)
-        end
-        if #repl == 1 then
-            return fpaths[1]
-        else
-            local idx = 1
-            local items = {}
-            sel_list = {}
-            for _, v in pairs(fpaths) do
-                item = v:gsub(".*/", "")
-                item = vim.fn.slice(item, 0, 60)
-                table.insert(items, item)
-                table.insert(sel_list, v)
-                idx = idx + 1
+
+    local results = {}
+    for _, v in pairs(repl) do
+        local path = TranslateZPath(v, citekey)
+        if path ~= "" then
+            local display = ""
+            if v:find(":") then
+                display = v:gsub(".*:", "") -- Get filename part
+            else
+                display = v
             end
-            vim.schedule(function() vim.ui.select(items, {}, cb) end)
+            display = display:gsub(".*/", "") -- Basename
+            table.insert(results, { display = display, path = path })
         end
+    end
+
+    if #results == 0 then
+        zwarn("No readable attachments found")
+        return
+    elseif #results == 1 then
+        return results[1].path
+    else
+        sel_list = {}
+        local items = {}
+        for _, res in ipairs(results) do
+            table.insert(items, res.display)
+            table.insert(sel_list, res.path)
+        end
+
+        local has_fzf, fzf = pcall(require, "fzf-lua")
+        if has_fzf then
+            vim.schedule(function()
+                fzf.fzf_exec(items, {
+                    prompt = "Select Attachment> ",
+                    winopts = { height = 0.3, width = 0.5 },
+                    actions = {
+                        ['default'] = function(selected)
+                            local choice = selected[1]
+                            for i, item in ipairs(items) do
+                                if item == choice then
+                                    cb(nil, i)
+                                    return
+                                end
+                            end
+                        end
+                    }
+                })
+            end)
+        else
+            vim.schedule(function() 
+                vim.ui.select(items, { prompt = "Select attachment:" }, function(choice, idx)
+                    for i, item in ipairs(items) do
+                        if item == choice then
+                            cb(nil, i)
+                            return
+                        end
+                    end
+                end) 
+            end)
+        end
+    end
+end
+
+function findCiteAtCursorTex(line, cursorCol)
+    -- returns \cite**{somestring} -> specific citekey under cursor or nil
+    local searchStart = 1
+    local col = cursorCol + 1 -- Lua 1-indexed
+
+    while true do
+        local startPos, endPos, match = line:find("(\\%a*cite%a*[^{]-%b{})", searchStart)
+        if not match then return nil end
+        
+        if col >= startPos and col <= endPos then
+            local content = match:match("{([^}]*)}")
+            if not content then return nil end
+            
+            -- Find which key is under the cursor
+            local relativeCol = col - startPos + 1
+            local braceStart = match:find("{")
+            local keysRelativeCol = relativeCol - braceStart
+            
+            local currentPos = 1
+            for key in content:gmatch("([^,]+)") do
+                local keyStart, keyEnd = content:find(key, currentPos, true)
+                if keyStart <= keysRelativeCol and keysRelativeCol <= keyEnd then
+                    return key:gsub("^%s*(.-)%s*$", "%1") -- trim
+                end
+                currentPos = keyEnd + 1
+            end
+            -- Fallback to first key if we are inside braces but not clearly on a key
+            return content:match("([^,]+)"):gsub("^%s*(.-)%s*$", "%1")
+        end
+        searchStart = endPos + 1
     end
 end
 
@@ -84,18 +198,57 @@ M.citation_key = function()
     local bbt = bbt or true -- assume by default that bbt is used, fix, TODO : read value from config
     if bbt then
 		-- get filetype 
-
         local word = vim.fn.expand("<cWORD>")
 		local ma   = ""
-		if vim.o.filetype == "tex" then
-			-- {citekey} : find citekey from cWORD 
-			ma  = word:match("{(%w+)}")
+		if vim.o.filetype == "tex" or vim.o.filetype == "latex" then
+			local buf = vim.api.nvim_get_current_buf()
+			local cursor = vim.api.nvim_win_get_cursor(0)
+			local row, col = cursor[1], cursor[2]
+			local line = vim.api.nvim_buf_get_lines(buf, row - 1, row, true)[1]
+			if not line then 
+				vim.notify("No line found at cursor")
+				return ""
+			end
+			local citestr = findCiteAtCursorTex(line, col)
+
+			if not citestr then
+				vim.notify("No citation found at cursor", vim.log.levels.WARN)
+				return ""
+			end
+
+			local menu_options = {"All"}
+			local keys = {}
+			for key in citestr:gmatch("([^,]+)") do
+				local key = key:gsub("^%s*(.-)%s*$", "%1")
+				table.insert(keys, key)  -- Trim outer spaces, May need fix ? when no space after comma
+				table.insert(menu_options, key)
+			end
+
+			if #keys == 0 then
+				vim.notify("No citation key found in \\cite{}", vim.log.levels.WARN)
+				return ""
+			elseif #keys == 1 then
+				ma = keys[1]
+			else
+				vim.ui.select(menu_options, {
+					prompt = "Select citation key:",
+				}, function(selected)
+					if selected then
+						ma = (selected == "All") and keys or selected
+						-- Since this is async, we might need a different approach if we want to return a value.
+						-- But for now, let's just picking the first one if it's called synchronously or 
+						-- we could pass a callback to citation_key.
+					end
+				end)
+				-- Fallback to first key if async select is used in sync context
+				ma = keys[1]
+			end
 		else
 			-- [@citekey], @citekey, [@citekey,p. 45], [@citekey; @citekey2, p. 45-50]
 			ma  = word:match("%[?@(%w+)%]?")
 		end
 
-		return ma or ""
+		return ma or "" -- returns empty string if not found, key or table if multiple keys(only in tex)
     else
         local lnum = vim.api.nvim_win_get_cursor(0)[1]
         local line = vim.api.nvim_buf_get_lines(0, lnum - 1, lnum, true)[1]
@@ -126,7 +279,7 @@ M.citation_key = function()
 end
 
 M.yaml_ref = function()
-    local wrd = M.citation_key()
+    local wrd = M.citation_key() -- handle tables
     if wrd ~= "" then
         local repl = vim.fn.py3eval('ZotCite.GetYamlRefs(["' .. wrd .. '"])')
         repl = repl:gsub("^references:[\n\r]*", "")
@@ -139,13 +292,15 @@ M.yaml_ref = function()
 end
 
 M.reference_data = function(btype)
-    local wrd = M.citation_key()
+    local wrd = M.citation_key() -- handle tables 
     if wrd ~= "" then
-        local repl = vim.fn.py3eval('ZotCite.GetRefData("' .. wrd .. '")')
+        local repl = get_ref_data_prioritized(wrd)
         if not repl then
             zwarn("Citation key not found")
             return
         end
+        local source = repl.source_file and (" [Source: " .. repl.source_file .. "]") or " [Source: Zotero DB]"
+        local title = (repl.title or "") .. source
         local info = {}
         if btype == "raw" then
             for k, v in pairs(repl) do
@@ -157,7 +312,7 @@ M.reference_data = function(btype)
                 table.insert(info, { repl.alastnm .. " ", "Identifier" })
             end
             if repl.year then table.insert(info, { repl.year .. " ", "Number" }) end
-            if repl.title then table.insert(info, { repl.title, "Title" }) end
+            if repl.title then table.insert(info, { title, "Title" }) end
         end
         vim.schedule(function() vim.api.nvim_echo(info, false, {}) end)
     end
@@ -201,13 +356,15 @@ M.citation = function()
 end
 
 M.abstract = function()
-    local wrd = M.citation_key()
+    local wrd = M.citation_key() -- handle tables
     if wrd ~= "" then
-        local repl = vim.fn.py3eval('ZotCite.GetRefData("' .. wrd .. '")')
+        local repl = get_ref_data_prioritized(wrd)
         if not repl then
             zwarn("Citation key not found")
             return
         end
+        local source = repl.source_file and (" [Source: " .. repl.source_file .. "]") or " [Source: Zotero DB]"
+        local title = (repl.title or "") .. source
         if repl.abstractNote then
             vim.api.nvim_put({ repl.abstractNote }, "l", true, true)
         else
@@ -339,8 +496,12 @@ end
 
 local finish_pdfnote = function(citekey)
     local zotkey = citekey -- FIXME : move to citekey from zotkey, citekey below is different 
-    local repl = vim.fn.py3eval('ZotCite.GetRefData("' .. zotkey .. '")')
-    local citekey = "@" .. zotkey .. "#" .. repl["citekey"]
+    local repl = get_ref_data_prioritized(zotkey)
+    if not repl then
+        zwarn("Citation key not found")
+        return
+    end
+    local citekey = "@" .. zotkey .. "#" .. (repl["citekey"] or zotkey)
     local pg = "1"
     if repl.pages and repl.pages:find("[0-9]-") then pg = repl.pages end
     pdfnote_data = { citekey = citekey, pg = pg }
@@ -446,12 +607,18 @@ local finish_open_attachment = function(_, idx)
 end
 
 M.open_attachment = function(citekey)
-    if not citekey then 
-        citekey = M.citation_key()
+    if not citekey then
+        citekey = M.citation_key() -- handle tables
     end
-    vim.notify('Opening PDF: @' .. citekey)
-    local apath = M.PDFPath(citekey, finish_open_attachment)
-    if type(apath) == "string" then require("zotcite.utils").open(apath) end
+    if citekey ~= "" then
+		local apath = M.PDFPath(citekey, finish_open_attachment)
+		if type(apath) == "string" then require("zotcite.utils").open(apath) end
+		vim.notify("Opening PDF: @" .. citekey )
+        -- Clear pdfnote_data
+        pdfnote_data = {}
+	else
+		vim.notify("Nothing to open", vim.log.levels.WARN)
+	end
 end
 
 return M

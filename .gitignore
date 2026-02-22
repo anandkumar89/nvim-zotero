@@ -3,4 +3,5 @@ doc/tags
 .toml
 .yml
 *.pyc
+.DS_Store
 

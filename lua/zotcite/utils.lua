@@ -113,4 +113,174 @@ M.open = function(fpath)
     end
 end
 
+function M.showcb(items, callback)
+	  if #items == 0 or #items > 9 then
+		vim.notify("Quick select supports 1-9 items only", vim.log.levels.WARN)
+		return
+	  end
+
+	  -- Create buffer
+	  local buf = vim.api.nvim_create_buf(false, true)
+	  vim.api.nvim_buf_set_option(buf, 'bufhidden', 'wipe')
+	  
+	  -- Prepare display lines
+	  local lines = {}
+	  for i, item in ipairs(items) do
+		table.insert(lines, string.format("%d) %s", i, item))
+	  end
+	  table.insert(lines, "")
+	  table.insert(lines, "x) Cancel")
+	  
+	  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+	  vim.api.nvim_buf_set_option(buf, 'modifiable', false)
+	  
+	  -- Calculate window size
+	  local width = 0
+	  for _, line in ipairs(lines) do
+		width = math.max(width, #line)
+	  end
+	  width = math.min(width + 4, 80)
+	  local height = #lines
+	  
+	  -- Center the window
+	  local ui = vim.api.nvim_list_uis()[1]
+	  local opts = {
+		relative = 'editor',
+		width = width,
+		height = height,
+		col = (ui.width - width) / 2,
+		row = (ui.height - height) / 2,
+		style = 'minimal',
+		border = 'rounded',
+		title = ' Select ',
+		title_pos = 'center',
+	  }
+	  
+	  local win = vim.api.nvim_open_win(buf, true, opts)
+	  vim.api.nvim_win_set_option(win, 'cursorline', true)
+	  
+	  -- Set up key mappings
+	  local function close_and_callback(choice)
+		vim.api.nvim_win_close(win, true)
+		if choice and callback then
+		  callback(choice, items[choice])
+		end
+	  end
+	  
+	  -- Map number keys
+	  for i = 1, #items do
+		vim.api.nvim_buf_set_keymap(buf, 'n', tostring(i), '', {
+		  nowait = true,
+		  noremap = true,
+		  silent = true,
+		  callback = function() close_and_callback(i) end
+		})
+	  end
+	  
+	  -- Map cancel key
+	  vim.api.nvim_buf_set_keymap(buf, 'n', 'x', '', {
+		nowait = true,
+		noremap = true,
+		silent = true,
+		callback = function() close_and_callback(nil) end
+	  })
+	  
+	  -- Also close on <Esc>
+	  vim.api.nvim_buf_set_keymap(buf, 'n', '<Esc>', '', {
+		nowait = true,
+		noremap = true,
+		silent = true,
+		callback = function() close_and_callback(nil) end
+	  })
+end
+
+function M.show(items)
+	  if #items == 0 or #items > 9 then
+		vim.notify("Quick select supports 1-9 items only", vim.log.levels.WARN)
+		return nil, nil
+	  end
+
+	  -- Create buffer
+	  local buf = vim.api.nvim_create_buf(false, true)
+	  vim.api.nvim_buf_set_option(buf, 'bufhidden', 'wipe')
+	  
+	  -- Prepare display lines
+	  local lines = {}
+	  for i, item in ipairs(items) do
+		table.insert(lines, string.format("%d) %s", i, item))
+	  end
+	  table.insert(lines, "")
+	  table.insert(lines, "x) Cancel")
+	  
+	  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+	  vim.api.nvim_buf_set_option(buf, 'modifiable', false)
+	  
+	  -- Calculate window size
+	  local width = 0
+	  for _, line in ipairs(lines) do
+		width = math.max(width, #line)
+	  end
+	  width = math.min(width + 4, 80)
+	  local height = #lines
+	  
+	  -- Center the window
+	  local ui = vim.api.nvim_list_uis()[1]
+	  local opts = {
+		relative = 'editor',
+		width = width,
+		height = height,
+		col = (ui.width - width) / 2,
+		row = (ui.height - height) / 2,
+		style = 'minimal',
+		border = 'rounded',
+		title = ' Select ',
+		title_pos = 'center',
+	  }
+	  
+	  local win = vim.api.nvim_open_win(buf, true, opts)
+	  vim.api.nvim_win_set_option(win, 'cursorline', true)
+	  
+	  -- Variable to store the result
+	  local choice = nil
+	  local done = false
+	  
+	  -- Set up key mappings
+	  local function close_with_choice(c)
+		choice = c
+		done = true
+		vim.api.nvim_win_close(win, true)
+	  end
+	  
+	  -- Map number keys
+	  for i = 1, #items do
+		vim.api.nvim_buf_set_keymap(buf, 'n', tostring(i), '', {
+		  nowait = true,
+		  noremap = true,
+		  silent = true,
+		  callback = function() close_with_choice(i) end
+		})
+	  end
+	  
+	  -- Map cancel keys
+	  for _, key in ipairs({'x', '<Esc>'}) do
+		vim.api.nvim_buf_set_keymap(buf, 'n', key, '', {
+		  nowait = true,
+		  noremap = true,
+		  silent = true,
+		  callback = function() close_with_choice(nil) end
+		})
+	  end
+	  
+	  -- Wait for input (blocking)
+	  vim.fn.getchar()
+	  
+	  -- Return selection
+	  if choice then
+		return items[choice]
+	  else
+		return
+	  end
+end
+
+
 return M

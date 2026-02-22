@@ -286,10 +286,9 @@ class ZoteroEntries:
             self._exclude = str(os.getenv('Zotcite_exclude')).split()
 
         self._zcopy = "copy_of_zotero"
-        self._bcopy = "copy_of_bbt"
-        self._bpath = "/Users/anand.kumar/Zotero/better-bibtex.sqlite"
-        self._sioyek_db_shared = self._copy_zotero_data(r"/Users/anand.kumar/Library/Application Support/Sioyek/shared.db", "sioyek_shared")    # highlights: document_path is hash, desc, text_annot, type, creation_time, moditication_time
-        self._sioyek_db_local  = self._copy_zotero_data(r"/Users/anand.kumar/Library/Application Support/sioyek/local.db",  "sioyek_local")            # document_hash: path, hash
+        _home = os.path.expanduser('~')
+        self._sioyek_db_shared = self._copy_zotero_data(os.path.join(_home, "Library", "Application Support", "Sioyek", "shared.db"), "sioyek_shared")    # highlights: document_path is hash, desc, text_annot, type, creation_time, moditication_time
+        self._sioyek_db_local  = self._copy_zotero_data(os.path.join(_home, "Library", "Application Support", "sioyek", "local.db"),  "sioyek_local")            # document_hash: path, hash
         self._c = {}
         self._e = {}
         self._cimap = {}
@@ -406,25 +405,20 @@ class ZoteroEntries:
         return zcopy
 
     def _load_zotero_data(self):
-        self._bbt = True # read this from config, TODO
         zcopy = self._copy_zotero_data(self._z, self._zcopy)
         print(zcopy)
         t1 = time.time()
         conn = sqlite3.connect(zcopy)
         self._cur = conn.cursor()
-        if self._bbt:
-            #read / get path, hardcoded now, TODO
-            zbcopy = self._copy_zotero_data(self._bpath, self._bcopy)
-            queryA = f"ATTACH DATABASE '{zbcopy}' AS bbt"
-            self._cur.execute(queryA)
 
         self._get_collections()
         self._add_most_fields()
 
         self._add_authors()
         self._add_type()
+        self._get_groups()
         self._add_attachments()
-        self._calculate_citekeys() # bbt=True by default
+        self._calculate_citekeys()
         self._delete_items()
 
         conn.close()
@@ -452,6 +446,13 @@ class ZoteroEntries:
         self._cur.execute(query)
         for item_id, item_collection in self._cur.fetchall():
             self._c[item_collection].append(item_id)
+
+    def _get_groups(self):
+        self._libdirs = {1: 'library'}
+        query = "SELECT libraryID, groupID FROM groups"
+        self._cur.execute(query)
+        for lib_id, group_id in self._cur.fetchall():
+            self._libdirs[lib_id] = f'groups/{group_id}'
 
     def _add_most_fields(self):
         query = u"""
@@ -522,17 +523,19 @@ class ZoteroEntries:
 
     def _add_attachments(self):
         query = u"""
-            SELECT items.key, itemAttachments.parentItemID, itemAttachments.path
+            SELECT items.key, itemAttachments.parentItemID, itemAttachments.path, items.libraryID
             FROM items, itemAttachments
             WHERE items.itemID = itemAttachments.itemID
             """
         self._cur.execute(query)
-        for pKey, pId, aPath in self._cur.fetchall():
+        for pKey, pId, aPath, libId in self._cur.fetchall():
             if pId in self._e and not pKey is None and not aPath is None:
+                libDir = self._libdirs.get(libId, 'library')
+                entry = f"{pKey}:{libDir}:{aPath}"
                 if 'attachment' in self._e[pId]:
-                    self._e[pId]['attachment'].append(pKey + ':' + aPath)
+                    self._e[pId]['attachment'].append(entry)
                 else:
-                    self._e[pId]['attachment'] = [pKey + ':' + aPath]
+                    self._e[pId]['attachment'] = [entry]
 
     def _calculate_citekeys(self):
         ptrn = '^(' + ' |'.join(self._bwords) + ' )'
@@ -545,39 +548,19 @@ class ZoteroEntries:
                 else:
                     year = ''
             self._e[k]['year'] = year
-            if 'title' in self._e[k]:
+
+            # Initialize citekey if native Zotero citekey is available
+            if 'citationKey' in self._e[k] and self._e[k]['citationKey']:
+                ck = self._e[k]['citationKey']
+                self._e[k]['citekey'] = ck
+                self._cimap[ck] = k
+
+            # If citekey still missing, generate one
+            if 'citekey' not in self._e[k] and 'title' in self._e[k]:
                 title = re.sub(ptrn, '', self._e[k]['title'].lower())
                 title = re.sub('^[a-z] ', '', title)
                 titlew = re.sub('[ ,;:\\.!?].*', '', title)
-            else:
-                self._e[k]['title'] = ''
-                titlew = ''
-            lastname = 'No_author'
-            lastnames = ''
-            creators = ['author'] + self._creators
-            for c in creators:
-                if c in self._e[k]:
-                    lastname = self._e[k][c][0][0]
-                    for ln in self._e[k][c]:
-                        lastnames = lastnames + '+' + ln[0]
-                    break
-            if lastnames == '':
-                lastnames = 'No_author'
 
-        if self._bbt:
-            citekeys = self._cur.execute("select itemID, itemKey, citationKey from citationkey").fetchall()
-            for id, ik, ck in citekeys:
-                self._e[id]['citekey'] = ck     # citekey is usually available for all valid keys 
-                self._cimap[ck] = id            # hold reverse map in dictionary for quick lookup
-        else:
-            for k in self._e:
-                if 'title' in self._e[k]:
-                    title = re.sub(ptrn, '', self._e[k]['title'].lower())
-                    title = re.sub('^[a-z] ', '', title)
-                    titlew = re.sub('[ ,;:\\.!?].*', '', title)
-                else:
-                    self._e[k]['title'] = ''
-                    titlew = ''
                 lastname = 'No_author'
                 lastnames = ''
                 creators = ['author'] + self._creators
@@ -607,6 +590,7 @@ class ZoteroEntries:
                 key = key.replace("'", '')
                 key = key.replace("’", '')
                 self._e[k]['citekey'] = key
+                self._cimap[key] = k
 
 
     def _delete_items(self):
@@ -857,6 +841,109 @@ class ZoteroEntries:
         ref.append('}\n')
         return ref
 
+    def GetBibRefData(self, citekey, bib_files):
+        """
+        Search for a citekey in local .bib files.
+        Returns a dictionary of fields if found, else None.
+        """
+        import re
+        import os
+        for bib_file in bib_files:
+            bib_file = os.path.expanduser(bib_file)
+            if not os.path.exists(bib_file):
+                continue
+            try:
+                with open(bib_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except Exception:
+                continue
+            
+            # Find the start of the entry: @type{citekey,
+            start_pattern = rf'@[a-zA-Z]+\s*{{\s*{re.escape(citekey)}\s*,'
+            start_match = re.search(start_pattern, content, re.IGNORECASE)
+            if not start_match:
+                continue
+            
+            # Extract content until the matching closing brace
+            entry_start = start_match.start()
+            brace_level = 0
+            entry_end = -1
+            first_brace = content.find('{', entry_start)
+            if first_brace == -1: continue
+            
+            for i in range(first_brace, len(content)):
+                if content[i] == '{':
+                    brace_level += 1
+                elif content[i] == '}':
+                    brace_level -= 1
+                    if brace_level == 0:
+                        entry_end = i + 1
+                        break
+            
+            if entry_end == -1:
+                continue
+                
+            entry_content = content[entry_start:entry_end]
+            
+            # Extract common fields
+            res = {'citekey': citekey, 'zotkey': citekey, 'source_file': os.path.basename(bib_file)} # Use citekey as zotkey for bib entries
+            for field in ['title', 'author', 'year', 'journal', 'booktitle', 'date', 'abstract', 'abstractNote', 'file']:
+                f_match = re.search(rf'\b{field}\b\s*=\s*([{{"])(.*?)([}}"])', entry_content, re.IGNORECASE | re.DOTALL)
+                if f_match:
+                    val = f_match.group(2)
+                    # Clean up nested braces and LaTeX commands roughly
+                    val = re.sub(r'[{}]', '', val)
+                    val = re.sub(r'\s+', ' ', val).strip()
+                    res[field] = val
+            
+            # Normalize fields for Lua frontend
+            if 'abstractNote' not in res and 'abstract' in res:
+                res['abstractNote'] = res['abstract']
+            
+            if 'year' not in res and 'date' in res:
+                date_match = re.search(r'\d{4}', res['date'])
+                if date_match:
+                    res['year'] = date_match.group(0)
+            
+            if 'author' in res:
+                authors = []
+                for name in res['author'].split(' and '):
+                    name = name.strip()
+                    if ',' in name:
+                        parts = name.split(',')
+                        last = parts[0].strip()
+                        first = parts[1].strip() if len(parts) > 1 else ""
+                        authors.append([last, first])
+                    else:
+                        authors.append([name, ""])
+                res['author'] = authors
+                if authors:
+                    res['alastnm'] = authors[0][0]
+
+            # Also check if this citekey exists in Zotero to support zotero:// URLs
+            if citekey in self._cimap:
+                z_item = self._e[self._cimap[citekey]]
+                if 'attachment' in z_item:
+                    # Prefer Zotero attachments for zotero:// URLs
+                    res['attachment'] = z_item['attachment']
+
+            if 'file' in res:
+                # If we don't have Zotero attachments yet, use the ones from BibTeX
+                if 'attachment' not in res:
+                    paths = []
+                    for f in res['file'].split(';'):
+                        p = f.strip()
+                        # BibTeX 'file' format is often :path:type
+                        if p.startswith(':'):
+                            pp = p.split(':')
+                            if len(pp) > 1: p = pp[1]
+                        # For local files, we use a dummy ID and 'local' libDir
+                        paths.append(f"local:local:{p}")
+                    res['attachment'] = paths
+            
+            return res
+        return None
+
     def GetBib(self, keys):
         """ Build the contents of a .bib file
 
@@ -874,31 +961,29 @@ class ZoteroEntries:
     def GetAttachment(self, zotkey):
         """ Tell Vim what attachment is associated with the citation key
 
-            zotkey  (string): The Zotero key as it appears in the markdown document.
+            zotkey  (string): The citation key or Zotero key.
         """
-        if self._bbt: #zotkey is citekey   
-            citekey = zotkey 
-            return self._e[self._cimap[citekey]]['attachment']
-        else:
-            for k in self._e:
-                if self._e[k]['zotkey'] == zotkey:
-                    if 'attachment' in self._e[k]:
-                        return self._e[k]['attachment']
-                    return ["nOaTtAChMeNt"]
+        if zotkey in self._cimap:
+            return self._e[self._cimap[zotkey]].get('attachment', ["nOaTtAChMeNt"])
+        
+        # Try finding by Zotero key directly if not a citekey
+        for k in self._e:
+            if self._e[k]['zotkey'] == zotkey:
+                return self._e[k].get('attachment', ["nOaTtAChMeNt"])
+        
         return ["nOcItEkEy"]
 
     def GetRefData(self, zotkey):
         """ Return the key's dictionary.
 
-            zotkey  (string): The Zotero key as it appears in the markdown document.
+            zotkey  (string): The citation key or Zotero key.
         """
-
-        if self._bbt :
-            return self._e[self._cimap[zotkey]] # getting citekey
-        else :
-            for k in self._e:
-                if self._e[k]['zotkey'] == zotkey:
-                    return self._e[k]
+        if zotkey in self._cimap:
+            return self._e[self._cimap[zotkey]]
+        
+        for k in self._e:
+            if self._e[k]['zotkey'] == zotkey:
+                return self._e[k]
         return None
 
     def GetCitationById(self, Id):
@@ -966,7 +1051,6 @@ class ZoteroEntries:
                 # notes.append('')
                 notes.append('[@' + citekey + self._ypsep + page + ']\t' + self._sanitize_markdown(i[6]))
         return notes
-
 
     def GetNotes(self, key):
         """ Return user notes from a reference.
