@@ -5,66 +5,23 @@ local ns = vim.api.nvim_create_namespace("ZSeekPreview")
 local M = {}
 local use_fzf = true		-- read from configurations
 
--- Preview state
-local PREVIEW_MODES = {
-    METADATA = "metadata",
-    NOTES = "notes",
-    ANNOTATIONS = "annotations"
-}
-local PREVIEW_MODES = {
-    METADATA = "metadata",
-    NOTES = "notes",
-    ANNOTATIONS = "annotations"
-}
-local current_preview_mode = PREVIEW_MODES.METADATA -- Default fallback
-
-local get_mode_file = function()
-    local tmpdir = vim.env.Zotcite_tmpdir or "/tmp"
-    return tmpdir .. "/zotcite_preview_mode"
-end
-
-local set_mode = function(mode)
-    local f = io.open(get_mode_file(), "w")
-    if f then
-        f:write(mode)
-        f:close()
-    end
-end
-
-local get_mode = function()
-    local f = io.open(get_mode_file(), "r")
-    if f then
-        local mode = f:read("*all")
-        f:close()
-        return mode:gsub("%s+", "")
-    end
-    return PREVIEW_MODES.METADATA
-end
-
 local get_notes = function(citekey)
     local repl = vim.fn.py3eval('ZotCite.GetNotes("' .. citekey .. '")')
     if repl == vim.NIL or repl == "" then
-        return "No notes found."
+        return nil
     end
-    -- Add a header and simple demarcation
-    return "# NOTES\n\n" .. repl:gsub("\n\n", "\n\n---\n\n")
+    return repl
 end
 
 local get_annotations = function(citekey)
-    local raw_annotations = vim.fn.py3eval('ZotCite.GetAnnotations("' .. citekey .. '", 0)')
-    if #raw_annotations == 0 then
-        return "No annotations found."
+    local raw = vim.fn.py3eval('ZotCite.GetAnnotations("' .. citekey .. '", 0)')
+    if not raw or next(raw) == nil then
+        return nil
     end
-    -- Format annotations with dividers
-    local lines = { "# ANNOTATIONS", "" }
-    for _, line in ipairs(raw_annotations) do
-        table.insert(lines, line)
-        if line:match("^[^>]") then -- If it's a comment/text not starting with >
-             table.insert(lines, "---")
-        end
-    end
+    local lines = require("zotcite.get").format_annotations(raw)
     return table.concat(lines, "\n")
 end
+
 
 if not use_fzf then 			-- use telescope if not fzf_lua
 	local pickers = require("telescope.pickers")
@@ -191,27 +148,18 @@ end
 
 ---------------------------- fzf begin 
 local fopts = {
-	['--header']    = "<C-o>: Notes | <CR>: Sioyek | <C-a> : Annotation | <C-x> : Cite | <C-m> : Metadata",
+	['--header']    = "<C-o>: Open | <C-n>: Notes | <C-a>: Annotations | <C-i>: Metadata | <C-x>: Cite",
 	['--delimiter'] = '\t',
 	['--with-nth']  = '2',
 	['--ansi']      = true,
 	['--no-sort']   = "",
 	['--multi']     = "",
-	['--preview-window']   = "wrap:hidden"
+	['--preview-window']   = "wrap",
+    ['--bind']             = "ctrl-i:toggle-preview",
 }
 
 local get_fopts = function()
-    local mode_file = get_mode_file()
-    local opts = vim.deepcopy(fopts)
-    opts['--bind'] = string.format(
-        "ctrl-o:execute-silent(echo %s > %s)+preview:refresh," ..
-        "ctrl-a:execute-silent(echo %s > %s)+preview:refresh," ..
-        "ctrl-m:execute-silent(echo %s > %s)+preview:refresh",
-        PREVIEW_MODES.NOTES, mode_file,
-        PREVIEW_MODES.ANNOTATIONS, mode_file,
-        PREVIEW_MODES.METADATA, mode_file
-    )
-    return opts
+    return fopts
 end
 
 bibdata = {}
@@ -260,7 +208,7 @@ fzf_picker = function(data, pref)
 			exec_empty_query = true,
 			winopts = {
 				preview = {
-					hidden = true,
+					hidden = false, -- metadata visible by default
 					wrap = true,
 				},
 			},
@@ -271,33 +219,18 @@ fzf_picker = function(data, pref)
 					local previewer = base:extend()
 					function previewer:populate_preview_buf(selection)
 						local citekey = selection:match("([^\t]+)")
-						local text_data
-                        local mode = get_mode()
-                        
-                        if mode == PREVIEW_MODES.NOTES then
-                            text_data = { get_notes(citekey), {} }
-                        elseif mode == PREVIEW_MODES.ANNOTATIONS then
-                            text_data = { get_annotations(citekey), {} }
-                        else
-                            text_data = previewtext[citekey]
-                        end
+						local text_data = previewtext[citekey]
 
 						local tmpbuf = self:get_tmp_buffer()
 						vim.api.nvim_buf_set_lines(tmpbuf, 0, -1, false, vim.split(text_data[1], '\n'))
                         
-                        -- Set syntax to markdown for notes/annotations
-                        local mode = get_mode()
-                        if mode ~= PREVIEW_MODES.METADATA then
-                            vim.api.nvim_set_option_value("filetype", "markdown", { buf = tmpbuf })
-                        else
-						    for _, h in pairs(text_data[2]) do
-							    if vim.fn.has("nvim-0.11") == 1 then
-								    vim.hl.range(tmpbuf, ns, h.g, { 0, h.s }, { 0, h.e }, {})
-							    else
-								    vim.api.nvim_buf_add_highlight(tmpbuf, -1, h.g, 0, h.s, h.e)
-							    end
-						    end
-                        end
+						for _, h in pairs(text_data[2]) do
+							if vim.fn.has("nvim-0.11") == 1 then
+								vim.hl.range(tmpbuf, ns, h.g, { 0, h.s }, { 0, h.e }, {})
+							else
+								vim.api.nvim_buf_add_highlight(tmpbuf, -1, h.g, 0, h.s, h.e)
+							end
+						end
 						self:set_preview_buf(tmpbuf)
 					end
 				return previewer
@@ -305,22 +238,63 @@ fzf_picker = function(data, pref)
 			},
 			actions = {
 				['default'] = function(selected, opts)
-					print(opts.last_query)
 					local citekey = selected[1]:match("([^\t]+)")
-					print("Default action for: " .. citekey)
 					if citekey then
 						require("zotcite.get").open_attachment(citekey)
 					end
 				end,
-				-- -- Open loclist with selected references in formatted sense : @citekey Year Title
-				-- -- Has keymaps to open in Sioyek or copy citekeys or open annotations or corresponding notes
-				-- ['ctrl-q'] = function (selected, opts)
-				-- 	local winnr = vim.api.nvim_get_current_win()
-				-- 	local items = {}
-				-- 	for _, sel in pairs(selected) do
-				-- 		items.insert({
-				-- 			text = sel,
-				-- 			filename = vim.fn.expand("%:p"),
+				['ctrl-n'] = function(selected, opts)
+					local all_content = {}
+					for _, sel in ipairs(selected) do
+						local citekey = sel:match("([^\t]+)")
+						local data = vim.fn.py3eval('ZotCite.GetRefData("' .. citekey .. '")')
+						local header = "# NOTES: @" .. citekey
+						if data ~= vim.NIL and data.zotkey and data.libDir then
+							local uri = "zotero://select/" .. data.libDir .. "/items/" .. data.zotkey
+							header = header .. " ([Zotero Link](" .. uri .. "))"
+						end
+						
+						local notes = get_notes(citekey)
+						if notes then
+							table.insert(all_content, header .. "\n\n" .. notes)
+							table.insert(all_content, "\n\n---\n\n")
+						end
+					end
+                    if #all_content == 0 then
+                        vim.notify("No notes found for selected item(s).", vim.log.levels.INFO)
+                        return
+                    end
+					require("zotcite.get").display_scratch("Zotero Notes", vim.split(table.concat(all_content, "\n"), "\n"))
+				end,
+				['ctrl-a'] = function(selected, opts)
+					local all_content = {}
+					for _, sel in ipairs(selected) do
+						local citekey = sel:match("([^\t]+)")
+						local data = vim.fn.py3eval('ZotCite.GetRefData("' .. citekey .. '")')
+						local header = "# ANNOTATIONS: @" .. citekey
+						if data ~= vim.NIL and data.zotkey and data.libDir then
+							local uri = "zotero://select/" .. data.libDir .. "/items/" .. data.zotkey
+							header = header .. " ([Zotero Link](" .. uri .. "))"
+						end
+						
+						local annots = get_annotations(citekey)
+						if annots then
+							table.insert(all_content, header .. "\n\n" .. annots)
+							table.insert(all_content, "\n\n---\n\n")
+						end
+					end
+                    if #all_content == 0 then
+                        vim.notify("No annotations found for selected item(s).", vim.log.levels.INFO)
+                        return
+                    end
+					require("zotcite.get").display_scratch("Zotero Annotations", vim.split(table.concat(all_content, "\n"), "\n"))
+				end,
+				['ctrl-o'] = function(selected, opts)
+					local citekey = selected[1]:match("([^\t]+)")
+					if citekey then
+						require("zotcite.get").open_attachment(citekey)
+					end
+				end,
 				-- 			lnum = 1,
 				-- 			col = 1,
 				-- 		})
@@ -429,7 +403,6 @@ M.refs = function(key, cb)
 
 
 
-		set_mode(PREVIEW_MODES.METADATA) -- Reset to default on open
 		fzf_picker(bibdata, {exact=true, prompt="grep >", cb=cb})
 
 	else

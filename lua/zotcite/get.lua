@@ -13,6 +13,44 @@ local citation = {
 
 local M = {}
 
+M.display_scratch = function(title, content)
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, content)
+    vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
+    vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
+    vim.api.nvim_set_option_value("bufhidden", "hide", { buf = buf })
+    vim.api.nvim_set_option_value("swapfile", false, { buf = buf })
+    
+    -- Ensure unique name by appending timestamp if needed, or just use title
+    pcall(vim.api.nvim_buf_set_name, buf, title)
+    
+    vim.api.nvim_command("vsplit")
+    vim.api.nvim_win_set_buf(0, buf)
+end
+
+M.format_annotations = function(grouped_data)
+    local lines = {}
+    local attachments = vim.tbl_keys(grouped_data)
+    table.sort(attachments)
+    
+    for i, att in ipairs(attachments) do
+        local annots = grouped_data[att]
+        if #annots > 0 then
+            if i > 1 then table.insert(lines, "") end
+            table.insert(lines, "## ATTACHMENT: " .. att)
+            table.insert(lines, "")
+            for _, line in ipairs(annots) do
+                table.insert(lines, line)
+                -- Add separator after non-quote lines (usually citations/notes)
+                if line:match("^[^>]") and line ~= "" then
+                    table.insert(lines, "---")
+                end
+            end
+        end
+    end
+    return lines
+end
+
 local TranslateZPath = function(strg, citekey)
     local id, libDir, rest = strg:match("([^:]+):([^:]+):(.*)")
 
@@ -308,6 +346,7 @@ M.reference_data = function(btype)
                 table.insert(info, { ": " .. vim.inspect(v):gsub("\n$", "") .. "\n" })
             end
         else
+            table.insert(info, { "@" .. (repl.citekey or wrd) .. " ", "Keyword" })
             if repl.alastnm then
                 table.insert(info, { repl.alastnm .. " ", "Identifier" })
             end
@@ -374,22 +413,46 @@ M.abstract = function()
 end
 
 M.finish_annotations = function(citekey)
-    local repl = vim.fn.py3eval(
+    local raw_data = vim.fn.py3eval(
         'ZotCite.GetAnnotations("' .. citekey .. '", ' .. offset .. ")"
     )
-    if #repl == 0 then
-        zwarn("No annotation found.")
+    if not raw_data or next(raw_data) == nil then
+        zwarn("No annotation found for @" .. citekey)
     else
-        local lnum = vim.api.nvim_win_get_cursor(0)[1]
-        vim.api.nvim_buf_set_lines(0, lnum, lnum, true, repl)
-        require("zotcite.config").hl_citations()
+        local data = vim.fn.py3eval('ZotCite.GetRefData("' .. citekey .. '")')
+        local header = "# ANNOTATIONS: @" .. citekey
+        if data ~= vim.NIL and data.zotkey and data.libDir then
+            local uri = "zotero://select/" .. data.libDir .. "/items/" .. data.zotkey
+            header = header .. " ([Zotero Link](" .. uri .. "))"
+        end
+        
+        local lines = { header, "" }
+        local formatted = M.format_annotations(raw_data)
+        for _, l in ipairs(formatted) do
+            table.insert(lines, l)
+        end
+        M.display_scratch("Zotero Annotations", lines)
     end
 end
 
 M.finish_annotations_selection = function(citekey)
-    local raw_annotations = vim.fn.py3eval(
+    local raw_data = vim.fn.py3eval(
         'ZotCite.GetAnnotations("' .. citekey .. '", ' .. offset .. ")"
     )
+
+    -- Flatten dictionary if needed for selection
+    local raw_annotations = {}
+    if raw_data and next(raw_data) ~= nil and raw_data[1] == nil then
+        local attachments = vim.tbl_keys(raw_data)
+        table.sort(attachments)
+        for _, att in ipairs(attachments) do
+            for _, a in ipairs(raw_data[att]) do
+                table.insert(raw_annotations, a)
+            end
+        end
+    else
+        raw_annotations = raw_data or {}
+    end
 
     if #raw_annotations == 0 then
         zwarn("No annotation found.")
@@ -435,34 +498,67 @@ end
 
 M.annotations = function(ko, use_selection)
     local argmt
-    if ko:find(" ") then
-        ko = vim.fn.split(ko)
-        argmt = ko[1]
-        offset = ko[2]
+    if ko and ko ~= "" then
+        if ko:find(" ") then
+            local p = vim.fn.split(ko)
+            argmt = p[1]
+            offset = p[2]
+        else
+            argmt = ko
+            offset = "0"
+        end
     else
-        argmt = ko
+        local key = M.citation_key()
+        if key ~= "" then
+            if type(key) == "table" then
+                -- Multiple keys in LaTeX \cite{a,b}, picker will handle it if we pass ""
+                argmt = ""
+            else
+                M.finish_annotations(key)
+                return
+            end
+        else
+            argmt = ""
+        end
         offset = "0"
     end
+
     if use_selection then
-        seek.refs(argmt, finish_annotations_selection)
+        seek.refs(argmt, M.finish_annotations_selection)
     else
-        seek.refs(argmt, finish_annotations)
+        seek.refs(argmt, M.finish_annotations)
     end
 end
 
-local finish_note = function(citekey)
+M.finish_note = function(citekey)
     local repl = vim.fn.py3eval('ZotCite.GetNotes("' .. citekey .. '")')
-    if repl == "" then
-        zwarn("No note found.")
+    if not repl or repl == vim.NIL or repl == "" then
+        zwarn("No note found for @" .. citekey)
     else
-        local lines = vim.fn.split(repl, "\n")
-        local lnum = vim.api.nvim_win_get_cursor(0)[1]
-        vim.api.nvim_buf_set_lines(0, lnum, lnum, true, lines)
-        require("zotcite.config").hl_citations()
+        local data = vim.fn.py3eval('ZotCite.GetRefData("' .. citekey .. '")')
+        local header = "# NOTES: @" .. citekey
+        if data ~= vim.NIL and data.zotkey and data.libDir then
+            local uri = "zotero://select/" .. data.libDir .. "/items/" .. data.zotkey
+            header = header .. " ([Zotero Link](" .. uri .. "))"
+        end
+        M.display_scratch("Zotero Notes", { header, "", repl })
     end
 end
 
-M.note = function(key) seek.refs(key, finish_note) end
+M.note = function(key)
+    if not key or key == "" then
+        local k = M.citation_key()
+        if k ~= "" then
+            if type(k) == "table" then
+                seek.refs("", M.finish_note)
+            else
+                M.finish_note(k)
+            end
+            return
+        end
+    end
+    seek.refs(key or "", M.finish_note)
+end
 
 local finish_pdfnote_2 = function(_, idx)
     local fpath = sel_list[idx]

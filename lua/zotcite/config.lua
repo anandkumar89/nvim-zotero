@@ -247,14 +247,21 @@ M.init = function()
             "<Plug>ZCitationInfo",
             "<Leader>zi",
             "<Cmd>lua require('zotcite.get').reference_data('ayt')<CR>",
-            "Zotcite: show reference info (short)"
+            "Zotcite: show reference info"
         )
         create_map(
             "n",
-            "<Plug>ZCitationCompleteInfo",
+            "<Plug>ZCitationNotes",
+            "<Leader>zn",
+            "<Cmd>lua require('zotcite.get').note()<CR>",
+            "Zotcite: show Zotero notes"
+        )
+        create_map(
+            "n",
+            "<Plug>ZCitationAnnotations",
             "<Leader>za",
-            "<Cmd>lua require('zotcite.get').reference_data('raw')<CR>",
-            "Zotcite: show reference info (complete)"
+            "<Cmd>lua require('zotcite.get').annotations('', false)<CR>",
+            "Zotcite: show Zotero annotations"
         )
         create_map(
             "n",

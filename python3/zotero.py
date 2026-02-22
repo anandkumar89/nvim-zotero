@@ -1004,7 +1004,10 @@ class ZoteroEntries:
         cur = conn.cursor()
         itemID = self._cimap[citekey]
         query = f"""
-            SELECT items.key, itemAttachments.ItemID, itemAttachments.parentItemID, itemAnnotations.parentItemID, itemAnnotations.type, itemAnnotations.authorName, itemAnnotations.text, itemAnnotations.comment, itemAnnotations.pageLabel
+            SELECT items.key, itemAttachments.ItemID, itemAttachments.parentItemID, 
+                   itemAnnotations.parentItemID, itemAnnotations.type, itemAnnotations.authorName, 
+                   itemAnnotations.text, itemAnnotations.comment, itemAnnotations.pageLabel,
+                   itemAttachments.path
             FROM items, itemAttachments, itemAnnotations
             WHERE items.itemID = {itemID}
             and items.itemID = itemAttachments.parentItemID
@@ -1013,12 +1016,21 @@ class ZoteroEntries:
         cur.execute(query)
 
         sioyek_highlights = self.sioyek_get_highlights(itemID)
-        if len(sioyek_highlights)>0:
-            notes = ["[@"+citekey+" sioyek]\t" + h for h in sioyek_highlights]
-        else : 
-            notes = []
+        
+        annot_groups = {}
+        if len(sioyek_highlights) > 0:
+            annot_groups["Sioyek"] = ["[@"+citekey+" sioyek]\t" + h for h in sioyek_highlights]
         
         for i in cur.fetchall():
+            path = i[9] or "Unknown Attachment"
+            if path.startswith("storage:"):
+                path = path[8:]
+            
+            if path not in annot_groups:
+                annot_groups[path] = []
+            
+            notes = annot_groups[path]
+            
             if i[8] is not None:
                 mo = re.match("^[0-9]*$", i[8])
             else: # web snapshots
@@ -1029,8 +1041,9 @@ class ZoteroEntries:
                 page = i[8]
             else: # web snapshots
                 page = None
+                
             if i[7]: # Comment
-                notes.append('')
+                # notes.append('') # Removed redundant empty line
                 if i[7].find("\n") > -1:
                     ss = i[7].split("\n")
                     for s in ss:
@@ -1044,19 +1057,18 @@ class ZoteroEntries:
                 else:
                     notes.append(i[7] + ' [@' + citekey + self._ypsep + page + ']')
             if i[6] and page is None: # Highlighted text, web snapshots
-                # notes.append('')
                 notes.append('[@' + citekey + ']\t' + self._sanitize_markdown(i[6].replace("\n"," ")))
             elif i[6]: # Highlighted text
-                # notes.append('')
                 notes.append('[@' + citekey + self._ypsep + page + ']\t' + self._sanitize_markdown(i[6]))
-        return notes
+        
+        return annot_groups
 
     def GetNotes(self, key):
         """ Return user notes from a reference.
 
             key (string): The Zotero key as it appears in the markdown document.
         """
-        zcopy = self._copy_zotero_data()
+        zcopy = self._copy_zotero_data(self._z, self._zcopy)
         conn = sqlite3.connect(zcopy)
         cur = conn.cursor()
 
